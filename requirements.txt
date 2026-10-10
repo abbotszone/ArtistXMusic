@@ -1,7 +1,0 @@
-pyrogram
-tgcrypto
-py-tgcalls>=2.2.0
-py-yt-search
-yt-dlp[default]
-pymongo
-python-dotenv

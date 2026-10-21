@@ -1,0 +1,311 @@
+# ==========================================================
+# Copyright (c) 2026 ArtistBots
+# All Rights Reserved.
+#
+# Project      : ArtistBots API Telegram Music Bot
+# Powered By   : Artist
+# Channel      : https://t.me/artistbots
+#
+# Plugin       : Tag members  (utag / all / mention / tagall + fun tags)
+# Location     : ArtistMusic/Artistbots/tagall.py
+#
+# Commands (group admins & sudoers only):
+#   /tagall | /all | @all | /utag | /mention [text]
+#                                    - ONE command: tag everyone, 6 emojis per message,
+#                                      every emoji is a hidden mention of one member
+#   /gmtag /gntag /hitag /lifetag /shayari
+#                                    - tag one member per message with a random line
+#   /ustop /tagstop /tagoff /gmstop /gnstop /histop /lifestop /shayarioff
+#                                    - stop the running tag session
+# ==========================================================
+
+import asyncio
+import html
+import random
+import re
+
+from pyrogram import Client, enums, filters
+from pyrogram.errors import FloodWait
+from pyrogram.types import Message
+
+from ArtistMusic import app, logger
+
+from .funtag_messages import (
+    GM_MESSAGES,
+    GN_MESSAGES,
+    HI_MESSAGES,
+    QUOTES,
+    SHAYARI,
+)
+
+PREFIXES = ["/", "!", "."]
+
+BATCH_SIZE = 6        # members (emojis) per message for tagall
+BATCH_DELAY = 3       # seconds between batches (grows automatically after a FloodWait)
+MAX_RETRIES = 5       # resend attempts for one batch when FloodWait hits
+
+# every emoji in a message is a clickable mention of a different member
+TAG_EMOJIS = [
+    "💕", "🌄", "🌚", "💆🏻", "👱🏻", "😃", "🌸", "🦋", "🔥", "✨", "🌙", "🎧",
+    "😎", "🥰", "🌺", "🍀", "💫", "🌈", "🎶", "😇", "🦄", "🍓", "🌻", "💖",
+    "😋", "🤗", "🌼", "⭐", "🎈", "🍭", "😜", "🐼", "🌷", "💎", "🕊️", "☀️",
+]
+FUN_DELAY = 4         # seconds between single fun-tag messages
+
+# chat_id -> name of the running session ("utag" | "tagall" | "gmtag" ...)
+active_tags: dict[int, str] = {}
+
+STOP_COMMANDS = [
+    "ustop", "tagstop", "tagoff",
+    "gmstop", "gnstop", "histop", "lifestop", "shayarioff",
+]
+
+_MD_BAD = re.compile(r"[\[\]\(\)\*_`~|\\]")
+
+
+def _name(user) -> str:
+    """First name that is safe inside a Markdown link label."""
+    name = _MD_BAD.sub("", user.first_name or "").strip()
+    return name or "υsєʀ"
+
+
+def _link(user) -> str:
+    return f"[{_name(user)}](tg://user?id={user.id})"
+
+
+async def _is_admin(client: Client, message: Message) -> bool:
+    # anonymous admin (sent "as group")
+    if not message.from_user:
+        return bool(message.sender_chat and message.sender_chat.id == message.chat.id)
+
+    uid = message.from_user.id
+    if uid in app.sudoers:
+        return True
+    try:
+        member = await client.get_chat_member(message.chat.id, uid)
+        return member.status in (
+            enums.ChatMemberStatus.OWNER,
+            enums.ChatMemberStatus.ADMINISTRATOR,
+        )
+    except Exception:
+        return False
+
+
+async def _guard(client: Client, message: Message) -> bool:
+    """Common checks. Returns True when the command may run."""
+    if not await _is_admin(client, message):
+        await message.reply_text("🚫 <b>σηʟʏ ᴧᴅϻɪηs ᴄᴧη υsє ᴛʜɪs ᴄσϻϻᴧηᴅ.</b>")
+        return False
+
+    if message.chat.id in active_tags:
+        running = active_tags[message.chat.id]
+        await message.reply_text(
+            f"⚠️ <b>ᴧ ᴛᴧɢɢɪηɢ sєssɪση ɪs ᴧʟʀєᴧᴅʏ ʀυηηɪηɢ</b> (<code>{running}</code>).\n"
+            "➤ υsє <code>/tagstop</code> ᴛσ sᴛσᴘ ɪᴛ."
+        )
+        return False
+    return True
+
+
+async def _send(target: Message, text: str, **kw):
+    """Send one tag message; swallow FloodWait by sleeping, never crash the loop."""
+    try:
+        return await target.reply_text(
+            text,
+            parse_mode=enums.ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+            **kw,
+        )
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+    except Exception as e:
+        logger.warning(f"tag send failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  /tagall  /all  @all  /utag  /mention   (one command, 6 emojis per message)
+# ═══════════════════════════════════════════════════════════
+def _emoji_mention(user, emoji: str) -> str:
+    return f'<a href="tg://user?id={user.id}">{emoji}</a>'
+
+
+async def _send_batch(target: Message, text: str, state: dict):
+    """Send one batch. On FloodWait wait it out and RETRY the same batch
+    (never skip members). Also slows the whole session down afterwards."""
+    for _ in range(MAX_RETRIES):
+        try:
+            return await target.reply_text(
+                text,
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except FloodWait as e:
+            wait = int(e.value) + 1
+            logger.warning(f"tagall FloodWait {wait}s")
+            state["delay"] = min(state["delay"] + 2, 15)
+            await asyncio.sleep(wait)
+        except Exception as e:
+            logger.warning(f"tag send failed: {e}")
+            return None
+    return None
+
+
+async def _members(client: Client, chat_id: int):
+    """Iterate members; if get_chat_members itself hits FloodWait, wait and resume."""
+    seen = set()
+    for _ in range(MAX_RETRIES):
+        try:
+            async for member in client.get_chat_members(chat_id):
+                user = member.user
+                if not user or user.id in seen:
+                    continue
+                seen.add(user.id)
+                yield user
+            return
+        except FloodWait as e:
+            await asyncio.sleep(int(e.value) + 1)
+
+
+async def _tag_batches(client: Client, message: Message, session: str):
+    chat_id = message.chat.id
+    replied = message.reply_to_message
+    parts = (message.text or "").split(None, 1)
+    text = html.escape(parts[1]) if len(parts) > 1 else ""
+
+    if not await _guard(client, message):
+        return
+
+    active_tags[chat_id] = session
+    target = replied or message
+    state = {"delay": BATCH_DELAY}
+    batch, total = [], 0
+
+    async def flush():
+        nonlocal batch
+        if not batch:
+            return
+        emojis = random.sample(TAG_EMOJIS, len(batch))
+        line = " ".join(_emoji_mention(u, e) for u, e in zip(batch, emojis))
+        head = f"{text}\n\n" if text else ""
+        await _send_batch(target, f"{head}{line}", state)
+        batch = []
+
+    try:
+        async for user in _members(client, chat_id):
+            if chat_id not in active_tags:
+                break
+            if user.is_bot or user.is_deleted:
+                continue
+
+            batch.append(user)
+            total += 1
+            if len(batch) == BATCH_SIZE:
+                await flush()
+                await asyncio.sleep(state["delay"])
+
+        if chat_id in active_tags:
+            await flush()
+    except Exception as e:
+        logger.warning(f"{session} failed in {chat_id}: {e}")
+    finally:
+        was_stopped = chat_id not in active_tags
+        active_tags.pop(chat_id, None)
+
+    if not was_stopped:
+        try:
+            await message.reply_text(
+                f"✅ <b>ᴛᴧɢɢɪηɢ ᴄσϻᴘʟєᴛєᴅ. ᴛσᴛᴧʟ:</b> <code>{total}</code> <b>υsєʀs.</b>"
+            )
+        except FloodWait as e:
+            await asyncio.sleep(int(e.value) + 1)
+        except Exception:
+            pass
+
+
+# "@all" is plain text (not a /command), so it needs a regex filter
+_ATALL = filters.regex(r"(?i)^@all(\s|$)")
+
+
+@app.on_message(
+    (filters.command(["tagall", "all", "utag", "mention"], prefixes=PREFIXES) | _ATALL)
+    & filters.group
+    & ~app.bl_users
+)
+async def tagall_cmd(client: Client, message: Message):
+    await _tag_batches(client, message, "tagall")
+
+
+# ═══════════════════════════════════════════════════════════
+#  Fun tags: one member per message with a random line
+# ═══════════════════════════════════════════════════════════
+async def _fun_tag(client: Client, message: Message, session: str, pool: list):
+    chat_id = message.chat.id
+    if not await _guard(client, message):
+        return
+
+    active_tags[chat_id] = session
+    try:
+        async for member in client.get_chat_members(chat_id):
+            if chat_id not in active_tags:
+                break
+            user = member.user
+            if not user or user.is_bot or user.is_deleted:
+                continue
+            try:
+                await client.send_message(
+                    chat_id,
+                    f"{_link(user)} {random.choice(pool)}",
+                    parse_mode=enums.ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                continue
+            except Exception as e:
+                logger.warning(f"{session} send failed: {e}")
+                continue
+            await asyncio.sleep(FUN_DELAY)
+    except Exception as e:
+        logger.warning(f"{session} failed in {chat_id}: {e}")
+    finally:
+        active_tags.pop(chat_id, None)
+        try:
+            await client.send_message(chat_id, "✅ <b>ᴛᴧɢɢɪηɢ sєssɪση єηᴅєᴅ.</b>")
+        except Exception:
+            pass
+
+
+_FUN = {
+    "gmtag": GM_MESSAGES,
+    "gntag": GN_MESSAGES,
+    "hitag": HI_MESSAGES,
+    "lifetag": QUOTES,
+    "shayari": SHAYARI,
+}
+
+
+@app.on_message(
+    filters.command(list(_FUN), prefixes=PREFIXES) & filters.group & ~app.bl_users
+)
+async def fun_tag_cmd(client: Client, message: Message):
+    cmd = message.command[0].lower().split("@")[0]
+    await _fun_tag(client, message, cmd, _FUN[cmd])
+
+
+# ═══════════════════════════════════════════════════════════
+#  Stop
+# ═══════════════════════════════════════════════════════════
+@app.on_message(
+    filters.command(STOP_COMMANDS, prefixes=PREFIXES) & filters.group & ~app.bl_users
+)
+async def stop_tagging(client: Client, message: Message):
+    chat_id = message.chat.id
+
+    if chat_id not in active_tags:
+        return await message.reply_text("⚠️ <b>ησ ᴧᴄᴛɪᴠє ᴛᴧɢɢɪηɢ sєssɪση ғσυηᴅ.</b>")
+
+    if not await _is_admin(client, message):
+        return await message.reply_text("🚫 <b>σηʟʏ ᴧᴅϻɪηs ᴄᴧη sᴛσᴘ ᴛᴧɢɢɪηɢ.</b>")
+
+    active_tags.pop(chat_id, None)
+    await message.reply_text("🚫 <b>ᴛᴧɢɢɪηɢ ᴄᴧηᴄєʟʟєᴅ sυᴄᴄєssғυʟʟʏ.</b>")

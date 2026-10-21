@@ -28,7 +28,7 @@ from pyrogram import Client, enums, filters
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 
-from ArtistMusic import app, logger
+from ArtistMusic import app, db, logger
 
 from .funtag_messages import (
     GM_MESSAGES,
@@ -126,14 +126,28 @@ async def _send(target: Message, text: str, **kw):
 #  /tagall  /all  @all  /utag  /mention   (one command, 6 emojis per message)
 # ═══════════════════════════════════════════════════════════
 def _emoji_mention(user, emoji: str) -> str:
-    return f'<a href="tg://user?id={user.id}">{emoji}</a>'
+    return f'<a href="tg://openmessage?user_id={user.id}">{emoji}</a>'
 
 
 async def _send_batch(target: Message, text: str, state: dict):
     """Send one batch. On FloodWait wait it out and RETRY the same batch
-    (never skip members). Also slows the whole session down afterwards."""
+    (never skip members). Also slows the whole session down afterwards.
+
+    A bot cannot build a hidden mention (tg://user?id=) for a user it has never
+    seen -> PeerIdInvalid. The assistant already knows every member, so when the
+    bot fails we send that batch through the assistant account instead."""
+    chat_id = target.chat.id
+    use_assistant = state.get("use_assistant", False)
     for _ in range(MAX_RETRIES):
         try:
+            if use_assistant and state.get("assistant"):
+                return await state["assistant"].send_message(
+                    chat_id,
+                    text,
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_to_message_id=target.id,
+                )
             return await target.reply_text(
                 text,
                 parse_mode=enums.ParseMode.HTML,
@@ -145,17 +159,35 @@ async def _send_batch(target: Message, text: str, state: dict):
             state["delay"] = min(state["delay"] + 2, 15)
             await asyncio.sleep(wait)
         except Exception as e:
-            logger.warning(f"tag send failed: {e}")
+            logger.warning(f"tagall send failed ({type(e).__name__}): {e}")
+            if not use_assistant and state.get("assistant"):
+                use_assistant = state["use_assistant"] = True   # retry via assistant
+                continue
             return None
     return None
+
+
+async def _reader(client: Client, chat_id: int):
+    """A Telegram *bot* can only list admins of a group (that is why only 3 users
+    were tagged). The assistant (user account) can list EVERY member, so use it
+    when it is in the group; otherwise fall back to the bot client."""
+    try:
+        assistant = await db.get_client(chat_id)
+        if assistant:
+            await assistant.get_chat_member(chat_id, "me")  # is it inside this chat?
+            return assistant
+    except Exception as e:
+        logger.warning(f"tagall: assistant unavailable in {chat_id}: {e}")
+    return client
 
 
 async def _members(client: Client, chat_id: int):
     """Iterate members; if get_chat_members itself hits FloodWait, wait and resume."""
     seen = set()
+    reader = await _reader(client, chat_id)
     for _ in range(MAX_RETRIES):
         try:
-            async for member in client.get_chat_members(chat_id):
+            async for member in reader.get_chat_members(chat_id):
                 user = member.user
                 if not user or user.id in seen:
                     continue
@@ -177,7 +209,13 @@ async def _tag_batches(client: Client, message: Message, session: str):
 
     active_tags[chat_id] = session
     target = replied or message
-    state = {"delay": BATCH_DELAY}
+    state = {"delay": BATCH_DELAY, "assistant": None, "use_assistant": False}
+    try:
+        reader = await _reader(client, chat_id)
+        if reader is not client:
+            state["assistant"] = reader
+    except Exception:
+        pass
     batch, total = [], 0
 
     async def flush():
@@ -245,10 +283,9 @@ async def _fun_tag(client: Client, message: Message, session: str, pool: list):
 
     active_tags[chat_id] = session
     try:
-        async for member in client.get_chat_members(chat_id):
+        async for user in _members(client, chat_id):
             if chat_id not in active_tags:
                 break
-            user = member.user
             if not user or user.is_bot or user.is_deleted:
                 continue
             try:

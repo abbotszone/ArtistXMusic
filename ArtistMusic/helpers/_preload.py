@@ -37,6 +37,9 @@ class PreloadManager:
         # Track successfully preloaded media ids by chat:
         # {chat_id: {media_id, ...}}
         self._preloaded: Dict[int, Set[str]] = {}
+        # Limit parallel downloads so a big playlist doesn't hammer the API.
+        # Semaphore is FIFO, so songs closest to playing are fetched first.
+        self._sem = asyncio.Semaphore(2)
 
     async def preload_next(self, chat_id: int, media) -> None:
         """
@@ -84,18 +87,16 @@ class PreloadManager:
 
             logger.debug(f"Starting preload for chat {chat_id}: {media.title}")
             
-            # Download the track
+            # Download the track, then push it to the logger group so that a
+            # skip / later play is served instantly (disk or Telegram file_id)
+            video = getattr(media, "video", False)
             if not media.file_path:
-                media.file_path = await yt.download(
-                    media.id,
-                    video=getattr(media, "video", False),
-                )
-                if media.file_path:
-                    self._preloaded.setdefault(chat_id, set()).add(media.id)
-                logger.debug(f"Preload complete for chat {chat_id}: {media.title}")
-            else:
-                logger.debug(f"Track already has file_path for chat {chat_id}: {media.title}")
+                async with self._sem:
+                    media.file_path = await yt.download(media.id, video=video)
+            if media.file_path:
                 self._preloaded.setdefault(chat_id, set()).add(media.id)
+                await yt.cache_to_logger(media.id, media.file_path, video=video)
+                logger.debug(f"Preload complete for chat {chat_id}: {media.title}")
                 
         except asyncio.CancelledError:
             logger.debug(f"Preload cancelled for chat {chat_id}")
@@ -153,26 +154,37 @@ class PreloadManager:
         self._preloaded.pop(chat_id, None)
         self._tasks.pop(chat_id, None)
 
-    async def start_preload(self, chat_id: int, count: int = 2) -> None:
+    async def start_preload(self, chat_id: int, count: int | None = None) -> None:
         """
-        Start preloading multiple upcoming tracks from queue.
-        
+        Download + logger-cache every queued (not currently playing) track.
+
+        Called whenever songs are added to the queue and after each track
+        change. Already downloaded / in-progress tracks are skipped, so it is
+        safe to call repeatedly.
+
         Args:
             chat_id: The chat ID to preload for
-            count: Number of tracks to preload (default: 2)
+            count: Optional cap on how many upcoming tracks to handle
+                   (default: all of them)
         """
         try:
-            # Import here to avoid circular dependency
             from ArtistMusic import queue
-            
-            # Get full queue and preload upcoming tracks (skip first one - that's current)
-            all_tracks = queue.get_queue(chat_id)
-            if len(all_tracks) > 1:
-                # Preload next 'count' tracks
-                upcoming = all_tracks[1:min(1 + count, len(all_tracks))]
-                for media in upcoming:
-                    if not media.file_path:
+            from ArtistMusic.helpers._dataclass import Track
+
+            # [0] is playing now; only YouTube Tracks (Telegram files are already local)
+            upcoming = [t for t in queue.get_queue(chat_id)[1:] if isinstance(t, Track)]
+            if count:
+                upcoming = upcoming[:count]
+            for media in upcoming:
+                # Live streams have no file to download/cache
+                if getattr(media, "is_live", False):
+                    continue
+                if media.file_path:
+                    # Disk pe hai, par logger group mein na ho toh upload kar do
+                    if not self.is_preloaded(chat_id, media.id):
                         await self.preload_next(chat_id, media)
-                        
+                    continue
+                await self.preload_next(chat_id, media)
+
         except Exception as e:
             logger.debug(f"Error in start_preload for {chat_id}: {e}")

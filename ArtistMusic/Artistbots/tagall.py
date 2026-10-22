@@ -26,7 +26,7 @@ import re
 
 from pyrogram import Client, enums, filters
 from pyrogram.errors import FloodWait
-from pyrogram.types import Message
+from pyrogram.types import LinkPreviewOptions, Message
 
 from ArtistMusic import app, db, logger
 
@@ -113,7 +113,7 @@ async def _send(target: Message, text: str, **kw):
         return await target.reply_text(
             text,
             parse_mode=enums.ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             **kw,
         )
     except FloodWait as e:
@@ -125,33 +125,31 @@ async def _send(target: Message, text: str, **kw):
 # ═══════════════════════════════════════════════════════════
 #  /tagall  /all  @all  /utag  /mention   (one command, 6 emojis per message)
 # ═══════════════════════════════════════════════════════════
-def _emoji_mention(user, emoji: str) -> str:
+async def _known(client: Client, user_id: int) -> bool:
+    """True if the BOT can build a real hidden mention for this user."""
+    try:
+        await client.resolve_peer(user_id)
+        return True
+    except Exception:
+        return False
+
+
+def _emoji_mention(user, emoji: str, real: bool) -> str:
+    # real mention -> long-press shows the member's profile (no raw link)
+    # fallback      -> bot has never seen the user, so Telegram needs a link
+    if real:
+        return f'<a href="tg://user?id={user.id}">{emoji}</a>'
     return f'<a href="tg://openmessage?user_id={user.id}">{emoji}</a>'
 
 
 async def _send_batch(target: Message, text: str, state: dict):
-    """Send one batch. On FloodWait wait it out and RETRY the same batch
-    (never skip members). Also slows the whole session down afterwards.
-
-    A bot cannot build a hidden mention (tg://user?id=) for a user it has never
-    seen -> PeerIdInvalid. The assistant already knows every member, so when the
-    bot fails we send that batch through the assistant account instead."""
-    chat_id = target.chat.id
-    use_assistant = state.get("use_assistant", False)
+    """Send one batch FROM THE BOT ONLY. On FloodWait wait and RETRY the same batch."""
     for _ in range(MAX_RETRIES):
         try:
-            if use_assistant and state.get("assistant"):
-                return await state["assistant"].send_message(
-                    chat_id,
-                    text,
-                    parse_mode=enums.ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    reply_to_message_id=target.id,
-                )
             return await target.reply_text(
                 text,
                 parse_mode=enums.ParseMode.HTML,
-                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         except FloodWait as e:
             wait = int(e.value) + 1
@@ -160,9 +158,8 @@ async def _send_batch(target: Message, text: str, state: dict):
             await asyncio.sleep(wait)
         except Exception as e:
             logger.warning(f"tagall send failed ({type(e).__name__}): {e}")
-            if not use_assistant and state.get("assistant"):
-                use_assistant = state["use_assistant"] = True   # retry via assistant
-                continue
+            state["fails"] = state.get("fails", 0) + 1
+            state["last_error"] = f"{type(e).__name__}: {e}"
             return None
     return None
 
@@ -209,13 +206,7 @@ async def _tag_batches(client: Client, message: Message, session: str):
 
     active_tags[chat_id] = session
     target = replied or message
-    state = {"delay": BATCH_DELAY, "assistant": None, "use_assistant": False}
-    try:
-        reader = await _reader(client, chat_id)
-        if reader is not client:
-            state["assistant"] = reader
-    except Exception:
-        pass
+    state = {"delay": BATCH_DELAY}
     batch, total = [], 0
 
     async def flush():
@@ -223,7 +214,11 @@ async def _tag_batches(client: Client, message: Message, session: str):
         if not batch:
             return
         emojis = random.sample(TAG_EMOJIS, len(batch))
-        line = " ".join(_emoji_mention(u, e) for u, e in zip(batch, emojis))
+        reals = [await _known(client, u.id) for u in batch]
+        state["link_only"] = state.get("link_only", 0) + reals.count(False)
+        line = " ".join(
+            _emoji_mention(u, e, r) for u, e, r in zip(batch, emojis, reals)
+        )
         head = f"{text}\n\n" if text else ""
         await _send_batch(target, f"{head}{line}", state)
         batch = []
@@ -250,10 +245,16 @@ async def _tag_batches(client: Client, message: Message, session: str):
         active_tags.pop(chat_id, None)
 
     if not was_stopped:
-        try:
-            await message.reply_text(
-                f"✅ <b>ᴛᴧɢɢɪηɢ ᴄσϻᴘʟєᴛєᴅ. ᴛσᴛᴧʟ:</b> <code>{total}</code> <b>υsєʀs.</b>"
+        msg = f"✅ <b>ᴛᴧɢɢɪηɢ ᴄσϻᴘʟєᴛєᴅ. ᴛσᴛᴧʟ:</b> <code>{total}</code> <b>υsєʀs.</b>"
+        if state.get("fails"):
+            msg += (
+                f"\n⚠️ <b>Failed batches:</b> <code>{state['fails']}</code>\n"
+                f"<code>{html.escape(state.get('last_error', ''))[:300]}</code>"
             )
+        if state.get("link_only"):
+            msg += f"\nℹ️ <code>{state['link_only']}</code> users bot ne kabhi nahi dekhe (link-only mention)."
+        try:
+            await message.reply_text(msg)
         except FloodWait as e:
             await asyncio.sleep(int(e.value) + 1)
         except Exception:
@@ -293,7 +294,7 @@ async def _fun_tag(client: Client, message: Message, session: str, pool: list):
                     chat_id,
                     f"{_link(user)} {random.choice(pool)}",
                     parse_mode=enums.ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
                 )
             except FloodWait as e:
                 await asyncio.sleep(e.value)

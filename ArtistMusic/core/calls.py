@@ -385,7 +385,7 @@ class TgCall(PyTgCalls):
 
                 try:
                     asyncio.create_task(
-                        preload.start_preload(chat_id, count=2))
+                        preload.start_preload(chat_id))
                 except Exception as e:
                     logger.debug(f"Error starting preload for {chat_id}: {e}")
         except FileNotFoundError:
@@ -679,7 +679,7 @@ class TgCall(PyTgCalls):
 
                 try:
                     asyncio.create_task(
-                        preload.start_preload(chat_id, count=2))
+                        preload.start_preload(chat_id))
                 except Exception as e:
                     logger.debug(
                         f"Error starting preload after play_next for {chat_id}: {e}")
@@ -759,7 +759,7 @@ class TgCall(PyTgCalls):
             await self.play_media(chat_id, msg, track, message_chat_id=message_chat_id)
 
             try:
-                asyncio.create_task(preload.start_preload(chat_id, count=2))
+                asyncio.create_task(preload.start_preload(chat_id))
             except Exception:
                 pass
             return True

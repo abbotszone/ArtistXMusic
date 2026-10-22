@@ -353,7 +353,7 @@ async def play_hndlr(
             # ✨ NEW: Start preloading queued tracks in background
             try:
                 from ArtistMusic import preload
-                asyncio.create_task(preload.start_preload(chat_id, count=2))
+                asyncio.create_task(preload.start_preload(chat_id))
             except Exception:
                 # Non-critical, continue without preload
                 pass
@@ -423,6 +423,12 @@ async def play_hndlr(
     if not tracks:
         return
     added = playlist_to_queue(chat_id, tracks)
+    # Playlist tracks queued -> download + upload to logger group right away
+    try:
+        from ArtistMusic import preload
+        asyncio.create_task(preload.start_preload(chat_id))
+    except Exception:
+        pass
     try:
         await app.send_message(
             chat_id=m.chat.id,

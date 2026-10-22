@@ -50,6 +50,8 @@ class YouTube:
 
         # Same (video_id, video) ke parallel downloads ko ek hi task se serve karne ke liye
         self._inflight: dict[tuple[str, bool], asyncio.Future] = {}
+        # logger-group uploads currently running (prevents duplicate uploads)
+        self._uploading: set[tuple[str, bool]] = set()
 
         # Regular expression to match YouTube URLs
         self.regex = re.compile(
@@ -695,11 +697,19 @@ class YouTube:
         if not config.LOGGER_ID:
             return
 
+        # Same track ka upload already chal raha ho toh dobara mat karo
+        # (download task + preload task dono is function ko call karte hain)
+        ukey = (video_id, video)
+        if ukey in self._uploading:
+            return
+        self._uploading.add(ukey)
+
         # Agar MongoDB mein pehle se hai toh dobara upload mat karo
         # (redeploy ke baad fresh download hua lekin cache already valid tha)
         existing = await db.get_song_cache(video_id, video=video)
         if existing and existing.get("file_id"):
             logger.info(f"⏭️ [CACHE] {video_id} already in logger group DB — skipping re-upload")
+            self._uploading.discard(ukey)
             return
 
         try:
@@ -734,6 +744,8 @@ class YouTube:
             logger.info(f"📥 Cached {video_id} to logger group for instant future plays")
         except Exception as e:
             logger.warning(f"⚠️ Failed to cache {video_id} to logger group: {e}")
+        finally:
+            self._uploading.discard(ukey)
 
     async def download(self, video_id: str, is_live: bool = False, video: bool = False) -> Optional[str]:
         """

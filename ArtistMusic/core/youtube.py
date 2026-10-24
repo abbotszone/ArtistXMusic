@@ -79,6 +79,54 @@ class YouTube:
         logger.info(f"🍪 Cookies Fallback: {'ENABLED' if self.enable_cookies_fallback else 'DISABLED'}")
         logger.info("=" * 50)
 
+    # ───────────── bad-file detection / cleanup (touches ONLY the given video's files) ─────────────
+    _MEDIA_EXTS = {".mp3", ".mp4", ".m4a", ".webm", ".opus", ".ogg", ".wav", ".flac", ".mkv", ".mov"}
+
+    @staticmethod
+    def is_yt_id(value) -> bool:
+        """YouTube ids are exactly 11 chars; protects Telegram-uploaded files from being touched."""
+        import re as _re
+        return bool(value) and bool(_re.fullmatch(r"[A-Za-z0-9_-]{11}", str(value)))
+
+    @staticmethod
+    def is_bad_media_file(path: str) -> bool:
+        """True when the file is clearly NOT media: empty/tiny, or a JSON/HTML/text error body."""
+        try:
+            if os.path.getsize(path) < 1024:
+                return True
+            with open(path, "rb") as f:
+                head = f.read(512).lstrip()
+        except OSError:
+            return False
+        return head[:1] in (b"{", b"[", b"<") or head[:5].lower() in (b"error", b"<!doc")
+
+    async def purge_bad_download(self, video_id: str, video: bool = False, force: bool = False) -> list:
+        """Delete this video's broken file(s) so they get downloaded again.
+
+        force=False -> remove only files that sniff as non-media (valid cached songs stay untouched).
+        force=True  -> player (ffmpeg) rejected the file, so remove it, and drop the logger-group
+                       cache entry too (it may hold the same broken copy).
+        """
+        removed = []
+        if not self.is_yt_id(video_id):
+            return removed
+        for path in glob.glob(f"downloads/{glob.escape(video_id)}.*"):
+            if os.path.isdir(path) or Path(path).suffix.lower() not in self._MEDIA_EXTS:
+                continue
+            if force or self.is_bad_media_file(path):
+                try:
+                    os.remove(path)
+                    removed.append(path)
+                    logger.warning(f"🗑️ Removed broken cached file: {path}")
+                except OSError as e:
+                    logger.warning(f"Could not remove {path}: {e}")
+        if force:
+            try:
+                await db.delete_song_cache(video_id, video=video)
+            except Exception as e:
+                logger.debug(f"Could not clear logger cache entry for {video_id}: {e}")
+        return removed
+
     def _locate_download_file(self, video_id: str, video: bool = False) -> Optional[str]:
         """Locate any completed download file for a video id."""
         pattern = f"downloads/{video_id}*"
@@ -225,8 +273,15 @@ class YouTube:
 
         # Check if already downloaded
         if os.path.exists(file_path):
-            logger.debug(f"File already exists: {file_path}")
-            return file_path
+            if self.is_bad_media_file(file_path):
+                logger.warning(f"Cached file is broken, re-downloading: {file_path}")
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+            else:
+                logger.debug(f"File already exists: {file_path}")
+                return file_path
 
         try:
             download_type = "video" if video else "audio"
@@ -660,14 +715,26 @@ class YouTube:
 
         # Disk pe already hai (same session mein dobaara play hua)
         if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            logger.info(f"⚡ [CACHE HIT] {video_id} already on disk")
-            return file_path
+            if self.is_bad_media_file(file_path):
+                logger.warning(f"⚠️ [CACHE] {video_id} on disk is broken — removing and re-fetching")
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+            else:
+                logger.info(f"⚡ [CACHE HIT] {video_id} already on disk")
+                return file_path
 
         # Attempt 1: file_id se direct download karo
         try:
             logger.info(f"⚡ [CACHE HIT] Fetching {video_id} from logger group via file_id...")
             downloaded = await app.download_media(file_id, file_name=file_path)
             if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) > 0:
+                if self.is_bad_media_file(downloaded):
+                    logger.warning(f"⚠️ [CACHE] Logger copy of {video_id} is broken — clearing it")
+                    os.remove(downloaded)
+                    await db.delete_song_cache(video_id, video=video)
+                    return None
                 logger.info(f"✅ [CACHE] Served {video_id} instantly from logger group")
                 return downloaded
             # file download hua par empty hai — disk file saaf karo aur fallback try karo
@@ -695,6 +762,11 @@ class YouTube:
                         logger.info(f"🔄 [CACHE] Refreshed file_id for {video_id}, downloading...")
                         downloaded = await app.download_media(fresh_file_id, file_name=file_path)
                         if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) > 0:
+                            if self.is_bad_media_file(downloaded):
+                                logger.warning(f"⚠️ [CACHE] Logger copy of {video_id} is broken — clearing it")
+                                os.remove(downloaded)
+                                await db.delete_song_cache(video_id, video=video)
+                                return None
                             logger.info(f"✅ [CACHE] Served {video_id} via refreshed file_id")
                             return downloaded
                         if os.path.exists(file_path):
@@ -852,6 +924,10 @@ class YouTube:
             except asyncio.TimeoutError:
                 logger.error(f"Live stream URL extraction timed out for {video_id}")
                 return None
+
+        # Drop this song's broken local file(s) (JSON/HTML error bodies saved as .mp3) so they
+        # get downloaded again. Valid cached songs are NOT touched.
+        await self.purge_bad_download(video_id, video=video)
 
         # ⚡ Try instant cache from logger group first (same song played before
         # in any group gets served straight from Telegram, no re-download)

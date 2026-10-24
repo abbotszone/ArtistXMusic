@@ -167,6 +167,7 @@ class TgCall(PyTgCalls):
         media: Media | Track,
         seek_time: int = 0,
         message_chat_id: int = None,
+        _retry: bool = True,
     ) -> None:
         """Play media in voice chat.
 
@@ -424,6 +425,23 @@ class TgCall(PyTgCalls):
                 logger.error(f"RPC error in play_media for {chat_id}: {e}")
                 await self.stop(chat_id)
         except exceptions.NoAudioSourceFound:
+            # ffmpeg found no audio in the file -> it is a broken download (often a cached API
+            # error body). Delete ONLY this song's file, download it again and retry once.
+            media_id = getattr(media, "id", None)
+            if _retry and not getattr(media, "is_live", False) and yt.is_yt_id(media_id):
+                is_vid = getattr(media, "video", False)
+                try:
+                    logger.warning(f"No audio in file for {media_id} — deleting and re-downloading")
+                    await yt.purge_bad_download(media_id, video=is_vid, force=True)
+                    media.file_path = await yt.download(media_id, video=is_vid)
+                except Exception as e:
+                    logger.warning(f"Re-download failed for {media_id}: {e}")
+                    media.file_path = None
+                if media.file_path:
+                    return await self.play_media(
+                        chat_id, message, media, seek_time=seek_time,
+                        message_chat_id=message_chat_id, _retry=False,
+                    )
             if message:
                 try:
                     await message.edit_text(_lang["error_no_audio"])

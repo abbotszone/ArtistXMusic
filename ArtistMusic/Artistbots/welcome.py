@@ -135,6 +135,17 @@ async def auto_on(chat_id: int) -> bool:
 # ═══════════════════════════════════════════════════════════
 #  COLORED BUTTONS  (Bot API HTTP, falls back to normal buttons)
 # ═══════════════════════════════════════════════════════════
+_http: Optional[aiohttp.ClientSession] = None
+
+
+def _get_session() -> aiohttp.ClientSession:
+    """One shared session for Bot API calls (keeps the connection warm)."""
+    global _http
+    if _http is None or _http.closed:
+        _http = aiohttp.ClientSession()
+    return _http
+
+
 def styled_button(text: str, url: str, style: str = None) -> dict:
     btn = {"text": text, "url": url}
     if style:
@@ -169,10 +180,10 @@ async def _send_media_colored(chat_id: int, path: str, caption: str, buttons: li
         with open(path, "rb") as f:
             form.add_field(field, f.read(), filename=fname, content_type=ctype)
 
-        timeout = aiohttp.ClientTimeout(total=60, connect=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, data=form) as resp:
-                data = await resp.json()
+        timeout = aiohttp.ClientTimeout(total=30, connect=8)
+        session = _get_session()
+        async with session.post(url, data=form, timeout=timeout) as resp:
+            data = await resp.json()
         if data.get("ok"):
             res = data["result"]
             return {"chat_id": res["chat"]["id"], "message_id": res["message_id"]}
@@ -351,18 +362,54 @@ async def welcome(client, update: ChatMemberUpdated):
         except Exception:
             return
 
-    user = new.user
+    # Heavy work (avatar download, card render, upload) runs in the background so the
+    # update worker is freed at once and one slow join can't delay the next ones.
+    task = asyncio.create_task(_send_welcome(client, update, new.user))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+_bg_tasks: set = set()
+_card_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_card_sem() -> asyncio.Semaphore:
+    global _card_sem
+    if _card_sem is None:
+        _card_sem = asyncio.Semaphore(3)  # max 3 cards rendering at once (CPU friendly)
+    return _card_sem
+
+
+async def _send_welcome(client, update: ChatMemberUpdated, user) -> None:
+    cid = update.chat.id
     avatar = img = None
+    pp_path = f"downloads/pp_{user.id}.png"
     try:
-        avatar = (
-            await client.download_media(user.photo.big_file_id, file_name=f"downloads/pp_{user.id}.png")
-            if user.photo
-            else FALLBACK_PIC
-        )
+        async def _get_avatar():
+            if not user.photo:
+                return FALLBACK_PIC
+            try:
+                got = await asyncio.wait_for(
+                    client.download_media(user.photo.big_file_id, file_name=pp_path), timeout=10
+                )
+                return got or FALLBACK_PIC
+            except Exception:
+                return FALLBACK_PIC  # slow / failed photo download -> don't make the welcome late
+
+        async def _count():
+            try:
+                return await client.get_chat_members_count(cid)
+            except Exception:
+                return "?"
+
+        # run both network calls at the same time
+        avatar, members = await asyncio.gather(_get_avatar(), _count())
+
         name = user.first_name or "υsєʀ"
         uname_txt = user.username or "No Username"
-        img = await asyncio.to_thread(build_pic, avatar, name, user.id, uname_txt)
-        members = await client.get_chat_members_count(cid)
+        async with _get_card_sem():
+            img = await asyncio.to_thread(build_pic, avatar, name, user.id, uname_txt)
+
         caption = CAPTION_TXT.format(
             chat_title=html.escape(str(update.chat.title)),
             mention=user.mention,
@@ -404,9 +451,29 @@ async def welcome(client, update: ChatMemberUpdated):
         except Exception:
             return
     finally:
-        for f in (avatar, img):
+        for f in (avatar, img, pp_path):
             if f and os.path.exists(f) and str(_BASE) not in os.path.abspath(f):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
+
+
+# ─────────────── warm-up: load fonts once at startup (first welcome was the slowest) ───────────────
+def _warm_fonts() -> None:
+    try:
+        probe = Image.new("RGBA", (500, 200), (0, 0, 0, 0))
+        draw_text(
+            probe, (0, 0), "Aa Zz 123 हिन्दी العربية 中文 한국어 😎 ʟɪᴋᴇ ᴛʜɪs",
+            40, fill=(255, 255, 255, 255), max_width=480, min_size=24, primary=FONT_NAME,
+        )
+        _cap_offset(NAME_SIZE, FONT_NAME)
+        _cap_offset(ROW_SIZE, FONT_ROW)
+        Image.open(CARD_PATH).load()
+    except Exception as e:
+        logger.debug(f"Welcome font warm-up skipped: {e}")
+
+
+import threading as _threading
+
+_threading.Thread(target=_warm_fonts, daemon=True).start()

@@ -277,7 +277,19 @@ class YouTube:
                     # Download file with progress
                     downloaded = 0
                     last_log = 0
-                    with open(file_path, "wb") as f:
+                    # Content-Type guard: API sometimes sends JSON/HTML error with status 200
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    if any(t in ctype for t in ("json", "html", "text/")):
+                        try:
+                            body = (await response.text())[:200]
+                        except Exception:
+                            body = ""
+                        logger.error(f"❌ API returned non-media content ({ctype}) for {video_id}: {body}")
+                        return None
+
+                    # Download to a temp file; only moved to final path after validation
+                    tmp_path = file_path + ".part"
+                    with open(tmp_path, "wb") as f:
                         async for chunk in response.content.iter_chunked(65536):  # 64KB chunks
                             f.write(chunk)
                             downloaded += len(chunk)
@@ -294,14 +306,26 @@ class YouTube:
                                 last_log = downloaded
                     
                     # Verify file was created and has content
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                        # Sniff first bytes: reject JSON / HTML / text error bodies
+                        with open(tmp_path, "rb") as _f:
+                            head = _f.read(512).lstrip()
+                        if head[:1] in (b"{", b"[", b"<") or head[:5].lower() in (b"error", b"<!doc"):
+                            logger.error(f"❌ API sent non-media data for {video_id}: {head[:120]!r}")
+                            os.remove(tmp_path)
+                            return None
+                        # Never overwrite an existing cached file
+                        if os.path.exists(file_path):
+                            os.remove(tmp_path)
+                            return file_path
+                        os.replace(tmp_path, file_path)
                         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                         logger.info(f"✅ [API SUCCESS] Downloaded: {file_path} ({file_size_mb:.2f} MB)")
                         return file_path
                     else:
                         logger.error(f"❌ API download failed: file is empty or not created")
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
                         return None
 
         except asyncio.TimeoutError:

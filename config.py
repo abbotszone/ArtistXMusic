@@ -23,14 +23,14 @@ load_dotenv()
 class Config:
     def __init__(self):
         # Telegram API
-        self.API_ID: int = int(getenv("API_ID", "0"))
-        self.API_HASH: str = getenv("API_HASH", "")
+        self.API_ID: int = int(getenv("API_ID", "29308061"))
+        self.API_HASH: str = getenv("API_HASH", "462de3dfc98fd938ef9c6ee31a72d099")
         self.BOT_TOKEN: str = getenv("BOT_TOKEN", "")
         self.LOGGER_ID: int = int(getenv("LOGGER_ID", "0"))
         self.OWNER_ID: int = int(getenv("OWNER_ID", "0"))
 
         # Database
-        self.MONGO_URL: str = getenv("MONGO_DB_URI", "")
+        self.MONGO_URL: str = getenv("MONGO_DB_URI", "mongodb+srv://Elevenyts:Elevenyts@cluster0.vuyc1u2.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
 
         # Limits
         self.DURATION_LIMIT: int = int(getenv("DURATION_LIMIT", "300")) * 60
@@ -56,7 +56,7 @@ class Config:
         self.VIDEO_PLAY: bool = self._str_to_bool(getenv("VIDEO_PLAY", "True"))
         self.VIDEO_MAX_HEIGHT: int = self._parse_video_height()
 
-        # ArtistBots API @ArtistApibot
+        # ArtistBots API t.me/Artistbots 
         self.ARTISTBOTS_API_URL: str = getenv("ARTISTBOTS_API_URL", "https://artistbotsapi.bond")
         self.ARTISTBOTS_KEY: str = getenv("ARTISTBOTS_KEY", "")
         self.ENABLE_API: bool = self._str_to_bool(getenv("ENABLE_API", "True"))

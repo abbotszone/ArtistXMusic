@@ -1,4 +1,4 @@
-# Fly.io:  fly launch --no-deploy --copy-config   ->   fly secrets set BOT_TOKEN=... (see DEPLOY.md)   ->   fly deploy
+# Fly.io:  fly launch --no-deploy --copy-config  ->   fly secrets set BOT_TOKEN=... (see DEPLOY.md)   ->   fly deploy
 app = "artistmusic"
 primary_region = "sin"
 

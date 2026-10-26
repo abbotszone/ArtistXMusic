@@ -175,7 +175,7 @@
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-         Create a  .env  file with these values
+         Copy  Artist.env  to  .env  and fill these values
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -190,8 +190,8 @@
 | `MONGO_DB_URI` | ✅ | MongoDB connection string |
 | `LOGGER_ID` | ✅ | Telegram group ID for logs |
 | `OWNER_ID` | ✅ | Your Telegram user ID |
-| `ARTISTBOTS_API_URL` | ⚙️ | ArtistBots API endpoint |
-| `ARTISTBOTS_KEY` | ⚙️ | API key — [@ArtistApibot](https://t.me/ArtistApibot) |
+| `ARTISTBOTS_API_URL` | ⚙️ | ArtistBots API endpoint — `https://artistbotsapi.bond` (default) |
+| `ARTISTBOTS_KEY` | ⚙️ | API key — log in at [artistbotsapi.bond](https://artistbotsapi.bond) to get your key |
 | `SUPPORT_CHAT` | 🔵 | Support group link (optional) |
 | `SUPPORT_CHANNEL` | 🔵 | Updates channel link (optional) |
 | `START_IMG` | 🔵 | Start message image URL (optional) |
@@ -280,7 +280,7 @@ cd ArtistMusic
 pip3 install -U -r requirements.txt
 
 # Configure variables
-cp .env.example .env
+cp Artist.env .env
 nano .env
 
 # Run the bot

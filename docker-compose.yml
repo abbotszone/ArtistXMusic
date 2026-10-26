@@ -1,4 +1,4 @@
-# VPS / local:   cp sample.env .env   (fill it)   then:   docker compose up -d --build
+# VPS / local:   cp Artist.env .env   (fill it)   then:   docker compose up -d --build
 services:
   artistmusic:
     build: .

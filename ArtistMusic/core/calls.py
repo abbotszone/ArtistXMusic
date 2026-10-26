@@ -188,11 +188,9 @@ class TgCall(PyTgCalls):
         # - Otherwise: send to same chat as audio
         target_chat_for_messages = message_chat_id if message_chat_id else chat_id
 
-        # Generate thumbnail only if THUMB_GEN is enabled, otherwise use default
-        if config.THUMB_GEN and isinstance(media, Track):
-            _thumb = await thumb.generate(media)
-        else:
-            _thumb = config.DEFAULT_THUMB
+        # NOTE: Thumbnail is NOT generated here anymore.
+        # First the song starts in the VC, then the thumbnail is generated
+        # (see below, right after client.play() succeeds).
 
         if not media.file_path:
             if message:
@@ -262,6 +260,11 @@ class TgCall(PyTgCalls):
             # - fflags +genpts+igndts: Generate PTS, ignore DTS (smooth playback)
             # - sync ext: External sync (reduces A/V desync)
             ffmpeg_params = "-probesize 10M -analyzeduration 5M -rtbufsize 5M -fflags +genpts+igndts -sync ext"
+
+        # URL source (API /stream): auto-reconnect if the connection drops mid-song
+        _src = str(media.file_path)
+        if _src.startswith(("http://", "https://")) and not getattr(media, "is_live", False):
+            ffmpeg_params += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
         is_video = getattr(media, "video", False)
         video_flags = (
@@ -368,6 +371,17 @@ class TgCall(PyTgCalls):
                     keyboard = buttons.controls(chat_id, timer=timer_text)
                 else:
                     keyboard = buttons.controls(chat_id)
+
+                # ✅ Song is already playing in the VC at this point.
+                # Now generate the thumbnail (and the rest of the post-play work).
+                if config.THUMB_GEN and isinstance(media, Track):
+                    try:
+                        _thumb = await thumb.generate(media)
+                    except Exception as e:
+                        logger.debug(f"Thumbnail generation failed for {chat_id}: {e}")
+                        _thumb = config.DEFAULT_THUMB
+                else:
+                    _thumb = config.DEFAULT_THUMB
 
                 if message:
                     try:
@@ -602,13 +616,8 @@ class TgCall(PyTgCalls):
                         try:
                             msg = await app.send_message(chat_id=target_chat, text="🔁 Looping queue...")
                             if not first_track.file_path:
-                                is_live = getattr(
-                                    first_track, 'is_live', False)
-                                first_track.file_path = await yt.download(
-                                    first_track.id,
-                                    is_live=is_live,
-                                    video=getattr(first_track, 'video', False),
-                                )
+                                # stream-first (handles live streams too)
+                                first_track.file_path = await yt.get_play_source(first_track)
                             first_track.message_id = msg.id
                             await self.play_media(chat_id, msg, first_track, message_chat_id=message_chat_id)
                         except errors.ChannelPrivate:
@@ -652,12 +661,7 @@ class TgCall(PyTgCalls):
                 _lang = await lang.get_lang_for(getattr(media, "user_id", None), chat_id)
                 msg = None
                 if not media.file_path:
-                    is_live = getattr(media, 'is_live', False)
-                    media.file_path = await yt.download(
-                        media.id,
-                        is_live=is_live,
-                        video=getattr(media, 'video', False),
-                    )
+                    media.file_path = await yt.get_play_source(media)
                     if not media.file_path:
                         await self.stop(chat_id)
                         if msg:
@@ -768,7 +772,7 @@ class TgCall(PyTgCalls):
                 return await _fail("❌ Autoplay: no similar song found.")
 
             track.video = getattr(finished, "video", False)
-            track.file_path = await yt.download(track.id, video=track.video)
+            track.file_path = await yt.get_play_source(track)
             if not track.file_path:
                 return await _fail("❌ Autoplay: failed to fetch the next song.")
 

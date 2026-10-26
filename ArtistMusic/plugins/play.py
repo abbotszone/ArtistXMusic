@@ -369,11 +369,9 @@ async def play_hndlr(
                 video=False,
             )
         else:
-            # Regular songs: download via API/cookies
-            file.file_path = await yt.download(
-                file.id,
-                video=getattr(file, "video", False),
-            )
+            # Regular songs: stream URL from API (instant start), file saves in background.
+            # Falls back to full download automatically if streaming is not possible.
+            file.file_path = await yt.get_play_source(file)
 
         if not file.file_path:
             await safe_edit(

@@ -10,9 +10,9 @@ Sab platforms Docker use karte hain (ffmpeg install ho jata hai → music + anim
 | `MONGO_DB_URI` | ✅ | MongoDB connection string |
 | `OWNER_ID` | ✅ | Aapki Telegram ID |
 | `LOGGER_ID` | ✅ | Logger group ID (`-100…`). **Song cache bhi isi se chalta hai** |
-| `ARTISTBOTS_KEY` | ✅ | ArtistBots API key |
+| `ARTISTBOTS_KEY` | ✅ | ArtistBots API key. Log in at https://artistbotsapi.bond to get it |
 | `API_ID`, `API_HASH` | ✅ | my.telegram.org se |
-| `ARTISTBOTS_API_URL` | ❌ | Default `https://www.artistbotsapi.bond` |
+| `ARTISTBOTS_API_URL` | ❌ | Default `https://artistbotsapi.bond` |
 
 Bot ko Logger group me add karke admin banao (cache ke liye file bhejne ki permission chahiye).
 
@@ -49,7 +49,7 @@ Repo connect karo, **Dockerfile** builder chuno, env variables daalo, start comm
 
 ## VPS / local (Docker)
 ```bash
-cp sample.env .env      # fill karo
+cp Artist.env .env      # fill karo
 docker compose up -d --build
 docker compose logs -f
 ```

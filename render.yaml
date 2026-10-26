@@ -24,4 +24,4 @@ services:
       - key: API_HASH
         sync: false
       - key: ARTISTBOTS_API_URL
-        value: https://www.artistbotsapi.bond
+        value: https://artistbotsapi.bond

@@ -23,14 +23,14 @@ load_dotenv()
 class Config:
     def __init__(self):
         # Telegram API
-        self.API_ID: int = int(getenv("API_ID", "29308061"))
-        self.API_HASH: str = getenv("API_HASH", "462de3dfc98fd938ef9c6ee31a72d099")
+        self.API_ID: int = int(getenv("API_ID", "0"))
+        self.API_HASH: str = getenv("API_HASH", "")
         self.BOT_TOKEN: str = getenv("BOT_TOKEN", "")
         self.LOGGER_ID: int = int(getenv("LOGGER_ID", "0"))
         self.OWNER_ID: int = int(getenv("OWNER_ID", "0"))
 
         # Database
-        self.MONGO_URL: str = getenv("MONGO_DB_URI", "mongodb+srv://Elevenyts:Elevenyts@cluster0.vuyc1u2.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+        self.MONGO_URL: str = getenv("MONGO_DB_URI", "")
 
         # Limits
         self.DURATION_LIMIT: int = int(getenv("DURATION_LIMIT", "300")) * 60
@@ -57,12 +57,15 @@ class Config:
         self.VIDEO_MAX_HEIGHT: int = self._parse_video_height()
 
         # ArtistBots API @ArtistApibot
-        self.ARTISTBOTS_API_URL: str = getenv("ARTISTBOTS_API_URL", "https://www.artistbotsapi.bond")
+        self.ARTISTBOTS_API_URL: str = getenv("ARTISTBOTS_API_URL", "https://artistbotsapi.bond")
         self.ARTISTBOTS_KEY: str = getenv("ARTISTBOTS_KEY", "")
         self.ENABLE_API: bool = self._str_to_bool(getenv("ENABLE_API", "True"))
         self.ENABLE_COOKIES_FALLBACK: bool = self._str_to_bool(getenv("ENABLE_COOKIES_FALLBACK", "True"))
         self.API_TIMEOUT: int = int(getenv("API_TIMEOUT", "60"))
         self.API_STREAM_TIMEOUT: int = int(getenv("API_STREAM_TIMEOUT", "300"))
+        # True  -> API /stream se milne wale URL se VC me turant play (full download ka wait nahi)
+        # False -> purana tarika (pehle poori file download, phir play)
+        self.STREAM_FIRST: bool = self._str_to_bool(getenv("STREAM_FIRST", "True"))
 
         # YouTube Cookies
         self.COOKIES_URL: List[str] = self._parse_cookies()

@@ -139,11 +139,11 @@ async def handle_participant(update) -> None:
                 return action == flag
 
         if has(A.JOINED):
-            icon, label = "🎙", "ᴊᴏɪηєᴅ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
+            icon, label = "🌱", "ᴊᴏɪηєᴅ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
         elif has(A.LEFT):
-            icon, label = "🚪", "ʟєғᴛ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
+            icon, label = "🥀", "ʟєғᴛ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
         elif has(A.KICKED):
-            icon, label = "🔨", "ᴡᴧs ʀєϻσᴠєᴅ ғʀσϻ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
+            icon, label = "🌚", "ᴡᴧs ʀєϻσᴠєᴅ ғʀσϻ ᴛʜє ᴠᴏɪᴄє ᴄʜᴧᴛ"
         else:
             return  # mute / volume / hand-raise changes -> ignore
 
@@ -173,7 +173,7 @@ async def handle_participant(update) -> None:
         name = await _user_name(user_id)
         text = (
             f"<blockquote>{icon} {mention(user_id, name)} <b>{label}</b>\n"
-            f"🆔 <code>{user_id}</code></blockquote>"
+            f"👤 <code>{user_id}</code></blockquote>"
         )
 
         lock = _locks.setdefault(target, asyncio.Lock())

@@ -23,9 +23,16 @@ import asyncio
 import html
 import random
 import re
+from types import SimpleNamespace
 
 from pyrogram import Client, enums, filters
-from pyrogram.errors import FloodWait
+from pyrogram.errors import (
+    ChatAdminRequired,
+    FloodWait,
+    InviteRequestSent,
+    UserAlreadyParticipant,
+    UserNotParticipant,
+)
 from pyrogram.types import LinkPreviewOptions, Message
 
 from ArtistMusic import app, db, logger
@@ -136,9 +143,13 @@ async def _known(client: Client, user_id: int) -> bool:
 
 def _emoji_mention(user, emoji: str, real: bool) -> str:
     # real mention -> long-press shows the member's profile (no raw link)
-    # fallback      -> bot has never seen the user, so Telegram needs a link
     if real:
         return f'<a href="tg://user?id={user.id}">{emoji}</a>'
+    # bot has never seen this user: a hidden mention is impossible, but a plain
+    # @username still pings the member
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{username}"
     return f'<a href="tg://openmessage?user_id={user.id}">{emoji}</a>'
 
 
@@ -164,35 +175,154 @@ async def _send_batch(target: Message, text: str, state: dict):
     return None
 
 
-async def _reader(client: Client, chat_id: int):
-    """A Telegram *bot* can only list admins of a group (that is why only 3 users
-    were tagged). The assistant (user account) can list EVERY member, so use it
-    when it is in the group; otherwise fall back to the bot client."""
+# ───────── member tracking (passive) ─────────
+# A bot can never list all members of a group, it only "sees" people who talk.
+# So remember everybody the bot sees and use that list as a backup source.
+_seen_cache: set = set()
+
+
+def _tracked_col():
+    return db.db.tag_members
+
+
+@app.on_message(filters.group & ~filters.service, group=-9)
+async def _track_senders(client: Client, message: Message):
+    user = message.from_user
+    if not user or user.is_bot or user.is_deleted:
+        return
+    await _remember(message.chat.id, user)
+
+
+@app.on_message(filters.new_chat_members & filters.group, group=-9)
+async def _track_joined(client: Client, message: Message):
+    for user in message.new_chat_members or []:
+        if not user.is_bot:
+            await _remember(message.chat.id, user)
+
+
+async def _remember(chat_id: int, user):
+    key = (chat_id, user.id)
+    if key in _seen_cache:
+        return
+    _seen_cache.add(key)
+    try:
+        await _tracked_col().update_one(
+            {"_id": f"{chat_id}:{user.id}"},
+            {"$set": {
+                "chat_id": chat_id,
+                "user_id": user.id,
+                "first_name": user.first_name or "",
+                "username": user.username,
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"tagall: could not track {user.id}: {e}")
+
+
+async def _tracked_users(chat_id: int):
+    try:
+        async for d in _tracked_col().find({"chat_id": chat_id}):
+            yield SimpleNamespace(
+                id=d["user_id"],
+                first_name=d.get("first_name", ""),
+                username=d.get("username"),
+                is_bot=False,
+                is_deleted=False,
+            )
+    except Exception as e:
+        logger.warning(f"tagall: tracked list failed in {chat_id}: {e}")
+
+
+# ───────── assistant (user account) = the only one that can list everyone ─────────
+async def _ensure_assistant(client: Client, message: Message):
+    """Return (assistant, error). Joins the assistant into the group if needed."""
+    chat_id = message.chat.id
     try:
         assistant = await db.get_client(chat_id)
-        if assistant:
-            await assistant.get_chat_member(chat_id, "me")  # is it inside this chat?
-            return assistant
     except Exception as e:
-        logger.warning(f"tagall: assistant unavailable in {chat_id}: {e}")
-    return client
+        return None, f"no assistant available ({type(e).__name__})"
+    if not assistant:
+        return None, "assistant is not running (check STRING_SESSION)"
 
+    try:
+        member = await client.get_chat_member(chat_id, assistant.id)
+        if member.status in (
+            enums.ChatMemberStatus.BANNED,
+            enums.ChatMemberStatus.RESTRICTED,
+        ):
+            try:
+                await client.unban_chat_member(chat_id, assistant.id)
+            except Exception:
+                return None, "assistant is banned in this group, please unban it"
+        else:
+            return assistant, None
+    except UserNotParticipant:
+        pass
+    except ChatAdminRequired:
+        return None, "make the bot admin (with Invite Users) so the assistant can join"
+    except Exception as e:
+        logger.warning(f"tagall: assistant check failed in {chat_id}: {e}")
 
-async def _members(client: Client, chat_id: int):
-    """Iterate members; if get_chat_members itself hits FloodWait, wait and resume."""
-    seen = set()
-    reader = await _reader(client, chat_id)
-    for _ in range(MAX_RETRIES):
+    # assistant is not in the group -> add it
+    try:
+        if message.chat.username:
+            link = message.chat.username
+        else:
+            link = (await client.get_chat(chat_id)).invite_link
+            if not link:
+                link = await client.export_chat_invite_link(chat_id)
+    except ChatAdminRequired:
+        return None, "make the bot admin (with Invite Users) so the assistant can join"
+    except Exception as e:
+        return None, f"could not create invite link ({type(e).__name__})"
+
+    try:
+        await assistant.join_chat(link)
+    except UserAlreadyParticipant:
+        pass
+    except InviteRequestSent:
         try:
-            async for member in reader.get_chat_members(chat_id):
-                user = member.user
-                if not user or user.id in seen:
-                    continue
-                seen.add(user.id)
-                yield user
-            return
-        except FloodWait as e:
-            await asyncio.sleep(int(e.value) + 1)
+            await client.approve_chat_join_request(chat_id, assistant.id)
+        except Exception as e:
+            return None, f"assistant join request pending ({type(e).__name__})"
+    except Exception as e:
+        return None, f"assistant could not join ({type(e).__name__})"
+
+    await asyncio.sleep(1)
+    return assistant, None
+
+
+async def _members(client: Client, chat_id: int, reader=None):
+    """Yield every member: assistant list first, then bot admins, then members
+    the bot has seen talking. De-duplicated."""
+    seen = set()
+
+    async def _drain(source_client):
+        for _ in range(MAX_RETRIES):
+            try:
+                async for member in source_client.get_chat_members(chat_id):
+                    user = member.user
+                    if not user or user.id in seen:
+                        continue
+                    seen.add(user.id)
+                    yield user
+                return
+            except FloodWait as e:
+                await asyncio.sleep(int(e.value) + 1)
+            except Exception as e:
+                logger.warning(f"tagall: member listing failed in {chat_id}: {e}")
+                return
+
+    if reader is not None:
+        async for u in _drain(reader):
+            yield u
+    async for u in _drain(client):          # admins (bot can always see these)
+        yield u
+    async for u in _tracked_users(chat_id):  # everyone the bot saw chatting
+        if u.id not in seen:
+            seen.add(u.id)
+            yield u
 
 
 async def _tag_batches(client: Client, message: Message, session: str):
@@ -203,6 +333,14 @@ async def _tag_batches(client: Client, message: Message, session: str):
 
     if not await _guard(client, message):
         return
+
+    reader, reader_err = await _ensure_assistant(client, message)
+    if reader is None:
+        await message.reply_text(
+            "⚠️ <b>ᴧssɪsᴛᴧηᴛ ᴄᴧη'ᴛ ʟɪsᴛ ᴧʟʟ ϻєϻʙєʀs:</b> "
+            f"<code>{html.escape(reader_err or 'unknown')}</code>\n"
+            "➤ ᴛᴧɢɢɪηɢ ᴏηʟʏ ᴧᴅϻɪηs + ᴀᴄᴛɪᴠє ϻєϻʙєʀs."
+        )
 
     active_tags[chat_id] = session
     target = replied or message
@@ -224,7 +362,7 @@ async def _tag_batches(client: Client, message: Message, session: str):
         batch = []
 
     try:
-        async for user in _members(client, chat_id):
+        async for user in _members(client, chat_id, reader):
             if chat_id not in active_tags:
                 break
             if user.is_bot or user.is_deleted:
@@ -282,9 +420,10 @@ async def _fun_tag(client: Client, message: Message, session: str, pool: list):
     if not await _guard(client, message):
         return
 
+    reader, _err = await _ensure_assistant(client, message)
     active_tags[chat_id] = session
     try:
-        async for user in _members(client, chat_id):
+        async for user in _members(client, chat_id, reader):
             if chat_id not in active_tags:
                 break
             if not user or user.is_bot or user.is_deleted:

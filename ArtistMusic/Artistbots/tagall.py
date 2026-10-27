@@ -1,6 +1,6 @@
 # ==========================================================
 # Copyright (c) 2026 ArtistBots
-# All Rights Reserved.
+# All Rights Reserved. 
 #
 # Project      : ArtistBots API Telegram Music Bot
 # Powered By   : Artist

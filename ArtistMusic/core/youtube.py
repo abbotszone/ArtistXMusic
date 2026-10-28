@@ -22,6 +22,7 @@ import yt_dlp
 import random
 import uuid
 import asyncio
+from urllib.parse import urlencode
 import aiohttp
 from dataclasses import replace
 from pathlib import Path
@@ -236,51 +237,32 @@ class YouTube:
         else:
             logger.error("❌ No cookies saved! Check COOKIE_URL in .env.")
 
-    # ───────────── API /stream (JSON -> download_url) ─────────────
+    # ───────────── API /stream (inline play URL) ─────────────
     @staticmethod
     def _local_path(video_id: str, video: bool = False) -> str:
         return os.path.join("downloads", f"{video_id}{'.mp4' if video else '.mp3'}")
 
     async def _api_stream_info(self, video_id: str, video: bool = False) -> Optional[dict]:
         """
-        Call API `/stream`. Expected JSON:
-        {"success": true, "video_id": "...", "type": "audio", "title": "...",
-         "duration": 213, "format": "m4a", "download_url": "https://.../file/<token>.m4a"}
-        Returns the dict (with a valid download_url) or None.
+        Build the API `/stream` URL.
+
+        `/stream` plays the audio/video inline (it never returns JSON), so the
+        request URL itself is the playable URL - no extra request is needed.
+        Returns {"download_url": <stream url>} or None if the API is not configured.
         """
         if not (self.enable_api and self.api_url and self.artistbots_key):
             return None
-        params = {
+        query = urlencode({
             "url": video_id,
             "type": "video" if video else "audio",
             "api_key": self.artistbots_key,
+        })
+        return {
+            "success": True,
+            "video_id": video_id,
+            "type": "video" if video else "audio",
+            "download_url": f"{self.api_url.rstrip('/')}/stream?{query}",
         }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.api_url.rstrip('/')}/stream",
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=self.api_timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"⚠️ [API /stream] status {resp.status} for {video_id}")
-                        return None
-                    data = await resp.json(content_type=None)
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ [API /stream] timeout for {video_id}")
-            return None
-        except Exception as e:
-            logger.warning(f"⚠️ [API /stream] failed for {video_id}: {type(e).__name__}: {e}")
-            return None
-
-        if not isinstance(data, dict) or not data.get("success"):
-            logger.warning(f"⚠️ [API /stream] unsuccessful response for {video_id}: {str(data)[:150]}")
-            return None
-        url = data.get("download_url")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            logger.warning(f"⚠️ [API /stream] no valid download_url for {video_id}")
-            return None
-        return data
 
     async def _download_url_to_file(self, url: str, file_path: str, video_id: str = "") -> Optional[str]:
         """Save a media URL to `file_path` (temp file -> validate -> atomic move)."""

@@ -12,7 +12,7 @@ Sab platforms Docker use karte hain (ffmpeg install ho jata hai → music + anim
 | `LOGGER_ID` | ✅ | Logger group ID (`-100…`). **Song cache bhi isi se chalta hai** |
 | `ARTISTBOTS_KEY` | ✅ | ArtistBots API key. Log in at https://artistbotsapi.bond to get it |
 | `API_ID`, `API_HASH` | ✅ | my.telegram.org se |
-| `ARTISTBOTS_API_URL` | ❌ | Default `https://artistbotsapi.bond` |
+| `ARTISTBOTS_API_URL` | ❌ | Default `https://api.artistbotsapi.bond` |
 
 Bot ko Logger group me add karke admin banao (cache ke liye file bhejne ki permission chahiye).
 

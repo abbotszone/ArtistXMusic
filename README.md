@@ -190,7 +190,7 @@
 | `MONGO_DB_URI` | ✅ | MongoDB connection string |
 | `LOGGER_ID` | ✅ | Telegram group ID for logs |
 | `OWNER_ID` | ✅ | Your Telegram user ID |
-| `ARTISTBOTS_API_URL` | ⚙️ | ArtistBots API endpoint — `https://artistbotsapi.bond` (default) |
+| `ARTISTBOTS_API_URL` | ⚙️ | ArtistBots API endpoint — `https://api.artistbotsapi.bond` (default) |
 | `ARTISTBOTS_KEY` | ⚙️ | API key — log in at [artistbotsapi.bond](https://artistbotsapi.bond) to get your key |
 | `SUPPORT_CHAT` | 🔵 | Support group link (optional) |
 | `SUPPORT_CHANNEL` | 🔵 | Updates channel link (optional) |
